@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"time"
@@ -74,15 +76,49 @@ func (cfg *apiConfig) handlerChatWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	// Everything that can fail must happen before the upgrade: once the
+	// connection is hijacked, respondWithError can no longer reach the client.
+	_, err = cfg.db.GetChatMember(r.Context(), database.GetChatMemberParams{
+		ChatID: parsedChatID,
+		UserID: currentUserID,
+	})
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't upgrade", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			respondWithError(w, http.StatusForbidden, "not a member of this chat", nil)
+			return
+		}
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get chat member from db", err)
 		return
 	}
 
-	user, err := cfg.db.GetUserByID(context.Background(), currentUserID)
+	user, err := cfg.db.GetUserByID(r.Context(), currentUserID)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't get user from db", err)
+		return
+	}
+
+	messages, err := cfg.db.GetMessagesByChat(r.Context(), database.GetMessagesByChatParams{
+		ChatID: parsedChatID,
+		Limit:  50, // for chat history, loads last 50 msgs
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get messages from db", err)
+		return
+	}
+
+	err = cfg.db.MarkMessagesAsRead(r.Context(), database.MarkMessagesAsReadParams{
+		ChatID:   parsedChatID,
+		SenderID: currentUserID,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't mark messages as read from db", err)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		// Upgrade already wrote an error response to the client.
+		log.Printf("error upgrading connection: %v", err)
 		return
 	}
 
@@ -97,24 +133,6 @@ func (cfg *apiConfig) handlerChatWS(w http.ResponseWriter, r *http.Request) {
 
 	cfg.hub.register <- client
 
-	messages, err := cfg.db.GetMessagesByChat(context.Background(), database.GetMessagesByChatParams{
-		ChatID: parsedChatID,
-		Limit:  50, // for chat history, loads last 50 msgs
-	})
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't get messages from db", err)
-		return
-	}
-
-	err = cfg.db.MarkMessagesAsRead(context.Background(), database.MarkMessagesAsReadParams{
-		ChatID:   parsedChatID,
-		SenderID: currentUserID,
-	})
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't mark messages as read from db", err)
-		return
-	}
-
 	if len(messages) > 0 {
 		for _, msg := range messages {
 			payload, _ := json.Marshal(wsMessage{
@@ -127,7 +145,7 @@ func (cfg *apiConfig) handlerChatWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go client.writeToClient()
-	go client.readFromClient(cfg)
+	go client.readFromClient(cfg) /* #nosec G118 -- the connection outlives the request, so r.Context() would cancel every write as soon as this handler returns */
 }
 
 func (c *Client) writeToClient() {
