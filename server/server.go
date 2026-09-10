@@ -26,6 +26,9 @@ func Run() {
 	}
 
 	secret := os.Getenv("SECRET")
+	if secret == "" {
+		log.Fatal("SECRET must be set")
+	}
 
 	dbConn, err := sql.Open("postgres", dbURL)
 	if err != nil {

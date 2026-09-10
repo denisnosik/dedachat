@@ -2,3 +2,5 @@
 *.logs
 *.exe
 out
+CLAUDE.md
+.claude/
