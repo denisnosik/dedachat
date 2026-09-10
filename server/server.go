@@ -63,8 +63,7 @@ func Run() {
 	mux.HandleFunc("GET /api/friends", apiCfg.middlewareAuth(apiCfg.handlerGetFriends))
 	mux.HandleFunc("DELETE /api/friends", apiCfg.middlewareAuth(apiCfg.handlerDeleteFriend))
 
-	mux.HandleFunc("POST /api/online", apiCfg.middlewareAuth(apiCfg.handlerSetOnline))
-	mux.HandleFunc("POST /api/offline", apiCfg.middlewareAuth(apiCfg.handlerSetOffline))
+	mux.HandleFunc("GET /api/presence/ws", apiCfg.middlewareAuth(apiCfg.handlerPresenceWS))
 
 	server := &http.Server{
 		Addr:              ":8080",
