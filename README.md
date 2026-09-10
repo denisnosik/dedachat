@@ -183,6 +183,9 @@ GET  /api/notifications         - get unread messages and friend requests
 
 ### Status
 ```
-POST /api/online                - set user online
-POST /api/offline               - set user offline
+GET  /api/presence/ws           - hold open to be counted as online
 ```
+The client opens this socket after login and keeps it for the whole session. A
+user is online for exactly as long as their socket is alive, so a crash, a lost
+network or a killed process drops them within a minute — no explicit "I am
+leaving" call is needed, and none can be missed.

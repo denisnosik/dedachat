@@ -26,6 +26,7 @@ type CurrentUser struct {
 type config struct {
 	client      Client
 	currentUser *CurrentUser
+	presence    *presence
 }
 
 type clientModel struct {
@@ -184,17 +185,14 @@ func Run() {
 	cfg := &config{
 		client:      client,
 		currentUser: &CurrentUser{},
+		presence:    newPresence(),
 	}
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGTERM)
 	go func() {
 		<-c
-		if cfg.currentUser.Token != "" {
-			if err := cfg.client.setOffline(cfg.currentUser.Token); err != nil {
-				fmt.Printf("Couldn't set user offline. %v\n", err)
-			}
-		}
+		cfg.presence.Stop()
 		os.Exit(0)
 	}()
 
@@ -209,10 +207,6 @@ func Run() {
 		os.Exit(1)
 	}
 
-	// set offline when quit with tea.Quit
-	if cfg.currentUser.Token != "" {
-		if err := cfg.client.setOffline(cfg.currentUser.Token); err != nil {
-			fmt.Printf("Couldn't set user offline. %v\n", err)
-		}
-	}
+	// closing the presence socket is what sets the user offline
+	cfg.presence.Stop()
 }

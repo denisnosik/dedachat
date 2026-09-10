@@ -198,7 +198,7 @@ func (m authModel) doLogin() tea.Msg {
 		return loginErrMsg{fmt.Errorf("couldn't login")}
 	}
 
-	if err := m.cfg.client.setOnline(result.Token); err != nil {
+	if err := m.cfg.presence.Start(result.Token); err != nil {
 		return loginErrMsg{fmt.Errorf("couldn't set online")}
 	}
 
