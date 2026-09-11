@@ -10,6 +10,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/lib/pq v1.12.3
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/time v0.16.0
 )
 
 require (
