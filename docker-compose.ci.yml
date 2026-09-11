@@ -29,6 +29,11 @@ services:
       - GOOSE_DRIVER=postgres
       - GOOSE_DBSTRING=postgres://postgres:postgres@db:5432/messenger?sslmode=disable
       - GOOSE_MIGRATION_DIR=sql/schema
+      # The suite registers dozens of users from one IP within seconds, which
+      # is exactly what the production default is meant to stop. The API tier
+      # keeps its defaults: it is keyed per user, and no test comes close.
+      - RATE_LIMIT_AUTH_PER_MIN=6000
+      - RATE_LIMIT_AUTH_BURST=200
     ports:
       - "8080:8080"
     depends_on:

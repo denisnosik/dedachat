@@ -26,6 +26,8 @@ I built DEDA Chat to better understand how real-time messaging works under the h
 - Online/offline status tracking
 - Chat history
 - Health check endpoint for container orchestration readiness
+- Rate limiting — token buckets per IP on the credential endpoints, per user on the API, per connection on chat messages
+- Graceful shutdown — on `SIGTERM` the server drains in-flight requests and hangs up every WebSocket with a close frame
 
 
 ## Try It Now
@@ -80,6 +82,35 @@ Or you can build the client:
 > go build -o messenger ./cmd/client
 > ./messenger
 ```
+
+## Configuration
+
+Beyond `SECRET` and the database variables, everything is optional and has a
+working default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `RATE_LIMIT_AUTH_PER_MIN` | `20` | Requests per minute per client IP for `/api/register` and `/api/login` |
+| `RATE_LIMIT_AUTH_BURST` | `10` | How many of those may arrive back to back |
+| `RATE_LIMIT_API_PER_SEC` | `20` | Requests per second per user for every authenticated route (and per IP for the chat socket upgrade) |
+| `RATE_LIMIT_API_BURST` | `40` | How many of those may arrive back to back |
+| `TRUST_PROXY_HEADERS` | `false` | Take the client IP from `X-Forwarded-For` instead of the connection |
+
+Setting a limit to `0` disables that tier. A throttled request gets `429` with a
+`Retry-After` header; a client sending chat messages faster than five per second
+has its socket closed with a policy-violation close frame.
+
+Turn `TRUST_PROXY_HEADERS` on when — and only when — the server sits behind a
+proxy that rewrites `X-Forwarded-For` (Railway, nginx, a load balancer).
+Without it every request appears to come from the proxy, so all clients share
+one IP bucket; with it on a directly exposed server, anyone can spoof the
+header and get a fresh bucket per request.
+
+On `SIGTERM` (or Ctrl-C) the server stops accepting connections, finishes the
+requests it has, closes every chat and presence socket with a `1012 service
+restart` close frame and then closes the database — within eight seconds, so a
+`docker compose down` ends with the process exiting on its own rather than being
+killed. Press Ctrl-C a second time to skip the drain.
 
 ## Usage/Examples
 

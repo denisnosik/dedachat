@@ -44,6 +44,11 @@ func (cfg *apiConfig) handlerPresenceWS(w http.ResponseWriter, r *http.Request) 
 
 	cfg.hub.SetOnline(currentUserID)
 
+	// The hub tracks the connection as well as the refcount, so that shutdown
+	// can hang up presence sockets too — they live for the whole session, so at
+	// any moment they are most of the open connections.
+	cfg.hub.registerPresence <- client
+
 	go client.writePings()
 	go client.read()
 }
@@ -53,10 +58,9 @@ func (cfg *apiConfig) handlerPresenceWS(w http.ResponseWriter, r *http.Request) 
 func (c *presenceClient) read() {
 	defer func() {
 		close(c.done)
+		c.hub.unregisterPresence <- c
 		c.hub.SetOffline(c.userID)
-		if err := c.conn.Close(); err != nil {
-			log.Printf("error closing presence connection: %v", err)
-		}
+		closeSocket(c.conn)
 	}()
 
 	c.conn.SetReadLimit(maxMessageSize)
@@ -99,11 +103,11 @@ func (c *presenceClient) writePings() {
 
 		case <-ticker.C:
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				log.Printf("error setting presence write deadline: %v", err)
+				logWSError("setting presence write deadline", err)
 				return
 			}
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("error writing presence ping: %v", err)
+				logWSError("writing presence ping", err)
 				return
 			}
 		}

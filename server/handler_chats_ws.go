@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"time"
 	"uuid"
@@ -13,6 +14,7 @@ import (
 	"github.com/denisnosik/dedachat/internal/auth"
 	"github.com/denisnosik/dedachat/internal/database"
 	"github.com/gorilla/websocket"
+	"golang.org/x/time/rate"
 )
 
 type Client struct {
@@ -22,6 +24,9 @@ type Client struct {
 	nickname string
 	chatID   uuid.UUID
 	send     chan []byte
+	// limiter throttles inbound messages. It is per connection, so it needs no
+	// locking: only readFromClient touches it.
+	limiter *rate.Limiter
 }
 
 type Message struct {
@@ -43,7 +48,43 @@ const (
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512
+
+	// websocketCloseShutdown tells the peer the server is going away on
+	// purpose, so a reconnecting client knows it wasn't a network fault.
+	websocketCloseShutdown = websocket.CloseServiceRestart
 )
+
+// closeConn sends a close frame and then closes the socket. WriteControl and
+// Close are the only gorilla methods safe to call from a goroutine that doesn't
+// own the connection, which is what lets the hub hang up a client on shutdown.
+func closeConn(conn *websocket.Conn, code int, reason string) {
+	msg := websocket.FormatCloseMessage(code, reason)
+
+	err := conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(writeWait))
+	if err != nil && !errors.Is(err, websocket.ErrCloseSent) && !errors.Is(err, net.ErrClosed) {
+		log.Printf("error writing close frame: %v", err)
+	}
+
+	closeSocket(conn)
+}
+
+// closeSocket closes a connection, tolerating one that is already closed: on
+// shutdown the hub hangs up first, and then the read loop that noticed runs its
+// own deferred close.
+func closeSocket(conn *websocket.Conn) {
+	logWSError("closing websocket connection", conn.Close())
+}
+
+// logWSError logs a socket error unless it is one of the two expected ways a
+// connection ends: the hub already hung it up, or a close frame has already
+// gone out. Both are routine during shutdown and would otherwise print one
+// scary line per connected client.
+func logWSError(action string, err error) {
+	if err == nil || errors.Is(err, net.ErrClosed) || errors.Is(err, websocket.ErrCloseSent) {
+		return
+	}
+	log.Printf("error %s: %v", action, err)
+}
 
 type wsMessage struct {
 	Nickname  string    `json:"nickname"`
@@ -129,20 +170,27 @@ func (cfg *apiConfig) handlerChatWS(w http.ResponseWriter, r *http.Request) {
 		nickname: user.Nickname,
 		chatID:   parsedChatID,
 		send:     make(chan []byte, 256),
+		limiter:  rate.NewLimiter(wsMessagesPerSec, wsMessageBurst),
+	}
+
+	// History goes into the buffer before the hub is told about the client:
+	// after register the send channel belongs to the hub, which may close it
+	// (on a broadcast backlog, or on shutdown) while this handler still runs.
+	// The buffer is far larger than the 50-message history, so this can't block.
+	for _, msg := range messages {
+		payload, err := json.Marshal(wsMessage{
+			Nickname:  msg.Nickname,
+			CreatedAt: msg.CreatedAt,
+			Content:   msg.Content,
+		})
+		if err != nil {
+			log.Printf("Couldn't marshal history message: %v", err)
+			continue
+		}
+		client.send <- payload
 	}
 
 	cfg.hub.register <- client
-
-	if len(messages) > 0 {
-		for _, msg := range messages {
-			payload, _ := json.Marshal(wsMessage{
-				Nickname:  msg.Nickname,
-				CreatedAt: msg.CreatedAt,
-				Content:   msg.Content,
-			})
-			client.send <- payload
-		}
-	}
 
 	go client.writeToClient()
 	go client.readFromClient(cfg) /* #nosec G118 -- the connection outlives the request, so r.Context() would cancel every write as soon as this handler returns */
@@ -157,39 +205,40 @@ func (c *Client) writeToClient() {
 		select {
 		case msg, ok := <-c.send:
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				log.Printf("error setting write deadline: %v", err)
+				logWSError("setting write deadline", err)
 				return
 			}
 			if !ok {
-				if err := c.conn.WriteMessage(websocket.CloseMessage, []byte{}); err != nil {
-					log.Printf("error write message: %v", err)
-					return
-				}
+				// The hub closed the channel. On shutdown it has already sent
+				// a close frame and closed the socket, so this one is best
+				// effort; when the channel was dropped for a full send buffer
+				// instead, it is the client's only goodbye.
+				logWSError("writing close message", c.conn.WriteMessage(websocket.CloseMessage, []byte{}))
 				return
 			}
 
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
-				log.Printf("error next writer: %v", err)
+				logWSError("getting next writer", err)
 				return
 			}
 			_, err = w.Write(msg)
 			if err != nil {
-				log.Printf("error writing message: %v", err)
+				logWSError("writing message", err)
 				return
 			}
 
 			if err := w.Close(); err != nil {
-				log.Printf("error closing writer: %v", err)
+				logWSError("closing writer", err)
 				return
 			}
 		case <-ticker.C:
 			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				log.Printf("error setting write deadline: %v", err)
+				logWSError("setting write deadline", err)
 				return
 			}
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("error write message: %v", err)
+				logWSError("writing ping", err)
 				return
 			}
 		}
@@ -199,9 +248,7 @@ func (c *Client) writeToClient() {
 func (c *Client) readFromClient(cfg *apiConfig) {
 	defer func() {
 		c.hub.unregister <- c
-		if err := c.conn.Close(); err != nil {
-			log.Printf("error closing websocket connection: %v", err)
-		}
+		closeSocket(c.conn)
 	}()
 
 	c.conn.SetReadLimit(maxMessageSize)
@@ -229,6 +276,16 @@ func (c *Client) readFromClient(cfg *apiConfig) {
 			) {
 				log.Printf("error: %v", err)
 			}
+			break
+		}
+
+		// Nobody types faster than wsMessagesPerSec, so this only trips on a
+		// buggy or spamming client. Dropping the message silently would be
+		// worse than hanging up: the TUI echoes what it sends locally, so the
+		// sender would see a message the other side never got.
+		if !c.limiter.Allow() {
+			log.Printf("message rate limit exceeded by user %s, closing socket", c.userID)
+			closeConn(c.conn, websocket.ClosePolicyViolation, "message rate limit exceeded")
 			break
 		}
 
