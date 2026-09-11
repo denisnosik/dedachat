@@ -5,6 +5,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -169,11 +170,33 @@ func (cfg *apiConfig) middlewareRateLimitIP(limiter *keyedLimiter, next http.Han
 // a proxy (Railway, nginx, a load balancer) it *must* be set, or every request
 // arrives from the proxy and the whole world shares one bucket.
 func (cfg *apiConfig) clientIP(r *http.Request) string {
+	key := cfg.clientIPKey(r)
+
+	// TEMPORARY, remove once the proxy's behaviour is confirmed: with
+	// DEBUG_CLIENT_IP set, every keyed request reports what the proxy actually
+	// sent, so the Railway logs answer whether the key is the real client or
+	// the proxy itself. Off by default, and the whole block goes away with
+	// logClientIPKey.
+	if cfg.debugClientIP {
+		cfg.logClientIPKey(r, key)
+	}
+
+	return key
+}
+
+func (cfg *apiConfig) clientIPKey(r *http.Request) string {
 	if cfg.trustProxyHeaders {
 		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
 			// Leftmost entry is the original client; the rest are proxy hops.
-			if client := strings.TrimSpace(strings.Split(forwarded, ",")[0]); client != "" {
-				return client
+			client := strings.TrimSpace(strings.Split(forwarded, ",")[0])
+
+			// The header is client-supplied, so only a real address becomes a
+			// key: that keeps junk (or a newline, which would forge log lines)
+			// out of the bucket map, and the canonical form stops one client
+			// from holding several buckets by writing its own address in
+			// different notations.
+			if ip, err := netip.ParseAddr(client); err == nil {
+				return ip.Unmap().String()
 			}
 		}
 	}
@@ -185,6 +208,50 @@ func (cfg *apiConfig) clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// logClientIPKey is TEMPORARY diagnostic plumbing — delete it, the
+// DEBUG_CLIENT_IP branch in clientIP, and the apiConfig field together.
+//
+// It prints the headers a proxy might use for the client address next to the
+// key the limiter ended up with. Values are sanitised because they are
+// attacker-controlled: a raw header could otherwise inject newlines and forge
+// log lines.
+func (cfg *apiConfig) logClientIPKey(r *http.Request, key string) {
+	// #nosec G706 -- sanitizeForLog strips everything but address characters, which gosec's taint analysis can't see through
+	log.Printf("client-ip debug: key=%s remote=%s x-forwarded-for=%s x-real-ip=%s x-envoy-external-address=%s",
+		key,
+		sanitizeForLog(r.RemoteAddr),
+		sanitizeForLog(r.Header.Get("X-Forwarded-For")),
+		sanitizeForLog(r.Header.Get("X-Real-Ip")),
+		sanitizeForLog(r.Header.Get("X-Envoy-External-Address")),
+	)
+}
+
+// sanitizeForLog keeps only the characters an address list can legitimately
+// contain and caps the length, so nothing from a header survives into the log
+// as control characters. TEMPORARY, see logClientIPKey.
+func sanitizeForLog(value string) string {
+	if value == "" {
+		return "-"
+	}
+
+	const maxLen = 200
+	if len(value) > maxLen {
+		value = value[:maxLen]
+	}
+
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= '0' && r <= '9',
+			r >= 'a' && r <= 'f',
+			r >= 'A' && r <= 'F',
+			r == '.' || r == ':' || r == ',' || r == ' ' || r == '[' || r == ']' || r == '%':
+			return r
+		default:
+			return '?'
+		}
+	}, value)
 }
 
 // respondTooManyRequests answers a throttled request. It deliberately logs

@@ -132,6 +132,27 @@ func TestClientIPIgnoresForwardedHeaderUnlessTrusted(t *testing.T) {
 		"behind a trusted proxy the leftmost entry is the real client")
 }
 
+func TestClientIPRejectsForwardedGarbage(t *testing.T) {
+	cfg := apiConfig{trustProxyHeaders: true}
+
+	call := func(forwarded string) string {
+		req := httptest.NewRequest("POST", "/api/login", nil)
+		req.RemoteAddr = "10.0.0.1:5555"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		return cfg.clientIP(req)
+	}
+
+	// Anything that isn't an address falls back to the connection, so junk
+	// can't become a bucket key — nor a forged log line.
+	require.Equal(t, "10.0.0.1", call("not-an-ip"))
+	require.Equal(t, "10.0.0.1", call("198.51.100.9\ninjected log line"))
+	require.Equal(t, "10.0.0.1", call("evil.example.com"))
+
+	// Equivalent notations of one address share one bucket.
+	require.Equal(t, "198.51.100.9", call("::ffff:198.51.100.9"))
+	require.Equal(t, "2001:db8::1", call("2001:0db8:0000:0000:0000:0000:0000:0001"))
+}
+
 func TestClientIPFallsBackToRemoteAddr(t *testing.T) {
 	cfg := apiConfig{trustProxyHeaders: true}
 
