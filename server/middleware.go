@@ -26,9 +26,7 @@ func (cfg *apiConfig) middlewareAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// Per-user rate limiting lives here rather than on each route, so that
-		// adding a route can't accidentally leave it unlimited. The key is the
-		// user, not the IP: sessions of the same user share a budget, and
-		// different users behind one NAT don't.
+		// adding a route can't accidentally leave it unlimited.
 		if ok, retryAfter := cfg.limiters.api.allow(currentUserID.String()); !ok {
 			respondTooManyRequests(w, retryAfter)
 			return
