@@ -28,8 +28,6 @@ type apiConfig struct {
 	hub               *Hub
 	limiters          rateLimiters
 	trustProxyHeaders bool
-	// debugClientIP is TEMPORARY: see logClientIPKey in ratelimit.go.
-	debugClientIP bool
 }
 
 func Run() {
@@ -64,7 +62,6 @@ func Run() {
 		hub:               hub,
 		limiters:          newRateLimiters(),
 		trustProxyHeaders: envBool("TRUST_PROXY_HEADERS", false),
-		debugClientIP:     envBool("DEBUG_CLIENT_IP", false), // TEMPORARY
 	}
 
 	mux := http.NewServeMux()

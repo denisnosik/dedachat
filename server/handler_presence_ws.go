@@ -44,17 +44,12 @@ func (cfg *apiConfig) handlerPresenceWS(w http.ResponseWriter, r *http.Request) 
 
 	cfg.hub.SetOnline(currentUserID)
 
-	// The hub tracks the connection as well as the refcount, so that shutdown
-	// can hang up presence sockets too — they live for the whole session, so at
-	// any moment they are most of the open connections.
 	cfg.hub.registerPresence <- client
 
 	go client.writePings()
 	go client.read()
 }
 
-// read drains the socket until it dies. No message is ever expected on it;
-// reading is what processes pongs and notices that the peer is gone.
 func (c *presenceClient) read() {
 	defer func() {
 		close(c.done)
